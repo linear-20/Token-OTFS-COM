@@ -1,6 +1,7 @@
 """Tests for sparse multipath DD operator (Step 17A)."""
 
 import importlib
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -329,6 +330,44 @@ class OperatorMathTests(unittest.TestCase):
         self.assertTrue(torch.equal(self.x, x_copy))
         self.assertTrue(torch.equal(gains, g_copy))
 
+    def test_vectorized_matches_roll_reference_with_batch_specific_masks(self):
+        torch.manual_seed(17)
+        x = _complex_randn(5, 4, 6)
+        shifts = torch.tensor([
+            [[0, 0], [1, -2], [5, 7], [1, -2]],
+            [[-1, 0], [0, 3], [2, -7], [0, 0]],
+            [[4, 6], [3, -1], [-5, 2], [1, 1]],
+            [[2, -3], [0, 0], [2, -3], [-2, 8]],
+            [[7, -9], [1, 0], [0, -1], [4, 6]],
+        ], dtype=torch.long)
+        gains = _complex_randn(5, 4)
+        mask = torch.tensor([
+            [True, True, False, True],
+            [False, True, True, True],
+            [True, False, True, True],
+            [False, False, False, False],
+            [True, True, True, False],
+        ])
+        ch = SparseMultipathDDChannel(
+            path_shifts=shifts, path_gains=gains,
+            path_active_mask=mask,
+        )
+        actual = apply_sparse_multipath_dd_operator(x, ch)
+
+        expected = []
+        for batch_idx in range(x.shape[0]):
+            y = x[batch_idx] * 0.0 + gains[batch_idx].sum() * 0.0
+            for path_idx in range(shifts.shape[1]):
+                if bool(mask[batch_idx, path_idx]):
+                    delay, doppler = shifts[batch_idx, path_idx].tolist()
+                    y = y + gains[batch_idx, path_idx] * torch.roll(
+                        x[batch_idx], shifts=(delay, doppler), dims=(0, 1),
+                    )
+            expected.append(y)
+        self.assertTrue(
+            torch.allclose(actual, torch.stack(expected), atol=1e-5),
+        )
+
 
 # ============================================================================
 # C. Receiver contract tests
@@ -624,6 +663,47 @@ class AutogradTests(unittest.TestCase):
         self.assertIsNotNone(gains.grad)
         self.assertTrue(torch.equal(gains.grad, torch.zeros_like(gains.grad)))
 
+    def test_vectorized_grad_matches_roll_reference(self):
+        torch.manual_seed(19)
+        shifts = torch.tensor([
+            [[0, 0], [1, -2], [5, 7]],
+            [[-1, 0], [0, 3], [2, -7]],
+        ], dtype=torch.long)
+        mask = torch.tensor([
+            [True, False, True],
+            [True, True, False],
+        ])
+        x_actual = _complex_randn(2, 4, 6).requires_grad_(True)
+        gains_actual = _complex_randn(2, 3).requires_grad_(True)
+        ch = SparseMultipathDDChannel(
+            path_shifts=shifts, path_gains=gains_actual,
+            path_active_mask=mask,
+        )
+        actual = apply_sparse_multipath_dd_operator(x_actual, ch)
+        actual.abs().pow(2).sum().backward()
+
+        x_reference = x_actual.detach().clone().requires_grad_(True)
+        gains_reference = gains_actual.detach().clone().requires_grad_(True)
+        expected = []
+        for batch_idx in range(x_reference.shape[0]):
+            y = x_reference[batch_idx] * 0.0
+            for path_idx in range(shifts.shape[1]):
+                if bool(mask[batch_idx, path_idx]):
+                    delay, doppler = shifts[batch_idx, path_idx].tolist()
+                    y = y + gains_reference[batch_idx, path_idx] * torch.roll(
+                        x_reference[batch_idx],
+                        shifts=(delay, doppler), dims=(0, 1),
+                    )
+            expected.append(y)
+        torch.stack(expected).abs().pow(2).sum().backward()
+
+        self.assertTrue(torch.allclose(
+            x_actual.grad, x_reference.grad, atol=1e-4,
+        ))
+        self.assertTrue(torch.allclose(
+            gains_actual.grad, gains_reference.grad, atol=1e-4,
+        ))
+
 
 # ============================================================================
 # F. Quality tests
@@ -660,6 +740,11 @@ class QualityTests(unittest.TestCase):
     def test_operator_docstring_not_twisted_convolution(self):
         doc = apply_sparse_multipath_dd_operator.__doc__
         self.assertIn("NOT", doc)
+
+    def test_operator_hot_path_has_no_python_batch_loop_or_item(self):
+        source = inspect.getsource(apply_sparse_multipath_dd_operator)
+        self.assertNotIn("for b in range", source)
+        self.assertNotIn(".item()", source)
 
     def test_exports_importable(self):
         from transmitter import (

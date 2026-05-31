@@ -15,8 +15,6 @@ from dataclasses import dataclass
 
 import torch
 
-from .dd_shifts import dd_circular_shift
-
 
 @dataclass(frozen=True)
 class SparseMultipathDDChannel:
@@ -137,35 +135,40 @@ def apply_sparse_multipath_dd_operator(
 
     B, M, N = x_dd.shape
     K = channel.path_shifts.shape[1]
-    shifts = channel.path_shifts  # [B, K, 2], may be CPU or CUDA
-    gains = channel.path_gains    # [B, K], must match x_dd device/dtype
-    mask = channel.path_active_mask  # [B, K] bool or None
+    device = x_dd.device
+    shifts = channel.path_shifts.to(device=device)  # [B, K, 2]
+    gains = channel.path_gains  # [B, K], same device/dtype as x_dd
 
-    y_list = []
-    for b in range(B):
-        # Keep a zero-gradient graph anchor even when every padded path is
-        # inactive. This preserves backward() semantics without changing y.
-        y_b = x_dd[b] * 0.0 + gains[b].sum() * 0.0
-        for k in range(K):
-            # Active gate.
-            active = True if mask is None else bool(mask[b, k].item())
-            if not active:
-                continue
+    # torch.roll(x, shifts=(d, v)) maps output[m, n] to
+    # input[(m - d) % M, (n - v) % N]. Build all source indices at once
+    # so the hot path contains no Python loops and no per-path scalar
+    # extraction synchronizations on CUDA.
+    delay_out = torch.arange(M, device=device).reshape(1, 1, M, 1)
+    doppler_out = torch.arange(N, device=device).reshape(1, 1, 1, N)
+    delay_src = (
+        delay_out - shifts[:, :, 0].reshape(B, K, 1, 1)
+    ).remainder(M)
+    doppler_src = (
+        doppler_out - shifts[:, :, 1].reshape(B, K, 1, 1)
+    ).remainder(N)
+    flat_src = (delay_src * N + doppler_src).expand(B, K, M, N)
 
-            g = gains[b, k]  # complex scalar with autograd
-            d = int(shifts[b, k, 0].item())
-            v = int(shifts[b, k, 1].item())
+    x_flat = x_dd.reshape(B, 1, M * N).expand(B, K, M * N)
+    shifted = torch.gather(
+        x_flat, dim=2, index=flat_src.reshape(B, K, M * N),
+    ).reshape(B, K, M, N)
 
-            # Shift x_dd[b] (preserves autograd on x_dd).
-            shifted = dd_circular_shift(
-                x_dd[b:b + 1], d, v,
-            )[0]  # [M, N]
+    effective_gains = gains
+    if channel.path_active_mask is not None:
+        effective_gains = effective_gains * channel.path_active_mask.to(
+            device=device, dtype=gains.real.dtype,
+        )
 
-            y_b = y_b + g * shifted
-
-        y_list.append(y_b)
-
-    return torch.stack(y_list, dim=0)  # [B, M, N]
+    # Multiplication by a zero bool gate preserves a zero-gradient graph
+    # for all-inactive scenarios without a special-case branch.
+    return (
+        shifted * effective_gains.reshape(B, K, 1, 1)
+    ).sum(dim=1)
 
 
 def _validate_operator_inputs(

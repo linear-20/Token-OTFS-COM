@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -20,6 +21,7 @@ from transmitter import (
     sample_normalized_sparse_multipath_scenario_bank,
     sparse_multipath_operator_separation_scores,
 )
+import transmitter.multipath_margin as margin_kernel
 
 
 def _complex_randn(*shape, dtype=torch.complex64):
@@ -125,6 +127,26 @@ class BasicOutputTests(unittest.TestCase):
             self.cw, self.pairs, weighted_bank, self.mask,
         )
         self.assertTrue(torch.allclose(s1, s2))
+
+    def test_exact_chunking_matches_unchunked_scores(self):
+        with patch.object(
+            margin_kernel, "_MAX_VECTORIZED_OPERATOR_ELEMENTS", 10 ** 9,
+        ):
+            expected = sparse_multipath_operator_separation_scores(
+                self.cw, self.pairs, self.bank, self.mask,
+            )
+        with patch.object(
+            margin_kernel, "_MAX_VECTORIZED_OPERATOR_ELEMENTS", 2 * 8 * 10,
+        ), patch.object(
+            margin_kernel,
+            "apply_sparse_multipath_dd_operator",
+            wraps=margin_kernel.apply_sparse_multipath_dd_operator,
+        ) as mock_operator:
+            actual = sparse_multipath_operator_separation_scores(
+                self.cw, self.pairs, self.bank, self.mask,
+            )
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-5))
+        self.assertGreater(mock_operator.call_count, 1)
 
 
 # ============================================================================
@@ -535,6 +557,31 @@ class IntegrationAndAutogradTests(unittest.TestCase):
         self.assertIsNotNone(cb.raw_real.grad)
         self.assertIsNotNone(cb.raw_imag.grad)
         self.assertTrue(torch.isfinite(cb.raw_real.grad).all())
+
+    def test_exact_chunking_preserves_codeword_grad(self):
+        pairs = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+        bank = _simple_bank(R=3, K=2)
+        mask = torch.ones(1, 4, 4)
+
+        cw_unchunked = _complex_randn(4, 4, 4).requires_grad_(True)
+        with patch.object(
+            margin_kernel, "_MAX_VECTORIZED_OPERATOR_ELEMENTS", 10 ** 9,
+        ):
+            sparse_multipath_operator_separation_scores(
+                cw_unchunked, pairs, bank, mask,
+            ).sum().backward()
+
+        cw_chunked = cw_unchunked.detach().clone().requires_grad_(True)
+        with patch.object(
+            margin_kernel, "_MAX_VECTORIZED_OPERATOR_ELEMENTS", 2 * 4 * 4,
+        ):
+            sparse_multipath_operator_separation_scores(
+                cw_chunked, pairs, bank, mask,
+            ).sum().backward()
+
+        self.assertTrue(torch.allclose(
+            cw_chunked.grad, cw_unchunked.grad, atol=1e-5,
+        ))
 
 
 # ============================================================================

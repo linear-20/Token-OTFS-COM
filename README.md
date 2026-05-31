@@ -221,6 +221,7 @@ python -m experiments.tx_cloud_train \
   --test-pairs 2048 \
   --eval-every 250 \
   --checkpoint-every 250 \
+  --progress-every 25 \
   --train-bank-refresh-every 25 \
   --num-train-scenarios 64 \
   --num-validation-scenarios 256 \
@@ -256,6 +257,7 @@ python -m experiments.tx_cloud_train \
   --test-pairs 2048 \
   --eval-every 500 \
   --checkpoint-every 500 \
+  --progress-every 25 \
   --train-bank-refresh-every 25 \
   --num-train-scenarios 64 \
   --num-validation-scenarios 256 \
@@ -303,6 +305,7 @@ python -m experiments.tx_cloud_train \
   --test-pairs 2048 \
   --eval-every 500 \
   --checkpoint-every 500 \
+  --progress-every 25 \
   --train-bank-refresh-every 25 \
   --num-train-scenarios 64 \
   --num-validation-scenarios 256 \
@@ -330,6 +333,7 @@ checkpoint 包含 optimizer 状态、当前 codebook、当前训练场景和 RNG
 | `--test-pairs` | 固定测试 pair 数量 | 建议 2048 或更高 |
 | `--eval-every` | 验证间隔 | 建议 250 或 500 |
 | `--checkpoint-every` | checkpoint 间隔 | 建议与验证间隔一致 |
+| `--progress-every` | 终端轻量进度输出间隔 | 建议 25，不额外触发验证 |
 | `--train-bank-refresh-every` | 刷新训练信道场景库的间隔 | 建议 25 |
 | `--num-train-scenarios` | 每次训练场景库大小 \(R\) | 建议 64 |
 | `--num-validation-scenarios` | 固定 held-out 验证场景数 | 建议 256 |
@@ -430,6 +434,18 @@ artifacts/<run-name>/
 
 `artifacts/` 已在 `.gitignore` 中排除。正式实验结果应保存到云磁盘或对象存储，不要提交到 Git。
 
+CLI 还会按 `--progress-every` 在终端输出轻量 JSON 进度，包括：
+
+```text
+step
+target_step
+latest_train_l_core
+elapsed_seconds
+estimated_remaining_seconds
+```
+
+该进度输出不会额外执行 validation。
+
 ## 12. TX 训练后验收
 
 将训练后的 physical artifact 接回 controlled closed-loop：
@@ -526,4 +542,3 @@ curriculum max_doppler ... exceeds tx_config.max_channel_doppler ...
 - 已获得 BER/TER 保证；
 - 已完成 RX 泛化训练；
 - 已完成端到端论文实验。
-

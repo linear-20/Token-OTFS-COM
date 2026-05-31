@@ -84,6 +84,7 @@ class TXCloudTrainConfig:
     test_pairs: int = 512
     eval_every: int = 100
     checkpoint_every: int = 100
+    progress_every: int = 25
     train_bank_refresh_every: int = 25
     num_train_scenarios: int = 64
     num_validation_scenarios: int = 128
@@ -103,6 +104,7 @@ class TXCloudTrainConfig:
             "test_pairs",
             "eval_every",
             "checkpoint_every",
+            "progress_every",
             "train_bank_refresh_every",
             "num_train_scenarios",
             "num_validation_scenarios",
@@ -165,6 +167,7 @@ def run_tx_cloud_training(
     run_config: TXCloudTrainConfig | None = None,
     resume_checkpoint: str | Path | None = None,
     stop_after_step: int | None = None,
+    emit_progress: bool = False,
 ) -> dict:
     """Run or resume cloud-ready TX-only on-grid surrogate training.
 
@@ -174,6 +177,7 @@ def run_tx_cloud_training(
         run_config: Long-run controls.
         resume_checkpoint: Optional trusted checkpoint produced by this harness.
         stop_after_step: Optional controlled early stop for preemption testing.
+        emit_progress: If True, print lightweight JSON progress records.
 
     Returns:
         JSON-serializable manifest dict.
@@ -197,6 +201,11 @@ def run_tx_cloud_training(
                 f"stop_after_step must be <= train_steps "
                 f"({run_config.train_steps}), got {stop_after_step}."
             )
+    if not isinstance(emit_progress, bool):
+        raise TypeError(
+            f"emit_progress must be bool, "
+            f"got {type(emit_progress).__name__}."
+        )
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -308,6 +317,16 @@ def run_tx_cloud_training(
         )
 
     t_start = time.perf_counter()
+    if emit_progress:
+        _emit_progress({
+            "event": "training_start",
+            "completed_step": completed_step,
+            "target_step": (
+                run_config.train_steps if stop_after_step is None
+                else stop_after_step
+            ),
+            "resumed": resumed,
+        })
 
     def evaluate(
         *,
@@ -342,9 +361,19 @@ def run_tx_cloud_training(
             "run_elapsed_seconds": time.perf_counter() - t_start,
         }
         _append_jsonl(metrics_path, record)
+        if emit_progress:
+            _emit_progress({"event": "evaluation", **record})
         return record
 
     if not resumed:
+        if emit_progress:
+            _emit_progress({
+                "event": "baseline_validation_start",
+                "step": 0,
+                "validation_pairs": run_config.validation_pairs,
+                "validation_scenarios":
+                    run_config.num_validation_scenarios,
+            })
         evaluate(
             phase="baseline", split="validation", step=0,
             bank=validation_bank, pairs=validation_pairs,
@@ -391,6 +420,18 @@ def run_tx_cloud_training(
         optimizer.step()
         latest_train_loss = float(loss.item())
         completed_step = step
+        if emit_progress and step % run_config.progress_every == 0:
+            elapsed = time.perf_counter() - t_start
+            _emit_progress({
+                "event": "train_progress",
+                "step": step,
+                "target_step": target_step,
+                "latest_train_l_core": latest_train_loss,
+                "elapsed_seconds": elapsed,
+                "estimated_remaining_seconds": (
+                    elapsed / step * (target_step - step)
+                ),
+            })
 
         if (step % run_config.eval_every == 0
                 and step < target_step):
@@ -777,6 +818,10 @@ def _append_jsonl(path: Path, record: dict) -> None:
         handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
+def _emit_progress(record: dict) -> None:
+    print(json.dumps(record, ensure_ascii=True), flush=True)
+
+
 def _write_json(path: Path, payload: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with open(temporary, "w", encoding="ascii") as handle:
@@ -866,6 +911,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--test-pairs", type=int, default=512)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--checkpoint-every", type=int, default=100)
+    parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument("--train-bank-refresh-every", type=int, default=25)
     parser.add_argument("--num-train-scenarios", type=int, default=64)
     parser.add_argument("--num-validation-scenarios", type=int, default=128)
@@ -912,6 +958,7 @@ def main() -> None:
         test_pairs=args.test_pairs,
         eval_every=args.eval_every,
         checkpoint_every=args.checkpoint_every,
+        progress_every=args.progress_every,
         train_bank_refresh_every=args.train_bank_refresh_every,
         num_train_scenarios=args.num_train_scenarios,
         num_validation_scenarios=args.num_validation_scenarios,
@@ -926,6 +973,7 @@ def main() -> None:
         tx_config, args.output_dir, run_config=run_config,
         resume_checkpoint=args.resume_checkpoint,
         stop_after_step=args.stop_after_step,
+        emit_progress=True,
     )
     print(json.dumps({
         "completed_step": manifest["completed_step"],

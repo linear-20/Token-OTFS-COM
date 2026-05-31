@@ -20,6 +20,8 @@ from .sparse_multipath import (
     apply_sparse_multipath_dd_operator,
 )
 
+_MAX_VECTORIZED_OPERATOR_ELEMENTS = 32 * 1024 * 1024
+
 
 def sparse_multipath_operator_separation_scores(
     codeword_book: torch.Tensor,
@@ -74,25 +76,37 @@ def sparse_multipath_operator_separation_scores(
     v_idx = token_pairs[:, 1].to(device=codeword_book.device)
     delta = codeword_book[u_idx] - codeword_book[v_idx]  # [P, M, N]
 
-    # -- materialize and expand scenario channel ------------------------------
+    # -- materialize scenario channel -----------------------------------------
     ch_R = scenario_bank.materialize_channel(
         device=codeword_book.device, dtype=codeword_book.dtype,
     )
     R = ch_R.path_shifts.shape[0]
     K = ch_R.path_shifts.shape[1]
 
-    ch_flat = _expand_scenario_channel_for_pairs(ch_R, P, R, K)
-    delta_flat = delta.unsqueeze(1).expand(P, R, M, N).reshape(P * R, M, N)
+    # -- apply operator in exact memory-bounded chunks ------------------------
+    total = P * R
+    flat_batch_size = _operator_flat_batch_size(K, M, N)
+    score_chunks = []
+    for start in range(0, total, flat_batch_size):
+        stop = min(start + flat_batch_size, total)
+        flat_indices = torch.arange(
+            start, stop, device=codeword_book.device,
+        )
+        pair_indices = torch.div(flat_indices, R, rounding_mode="floor")
+        scenario_indices = flat_indices.remainder(R)
+        delta_chunk = delta[pair_indices]  # [C, M, N]
+        channel_chunk = _select_scenario_channel(ch_R, scenario_indices)
+        y_chunk = apply_sparse_multipath_dd_operator(
+            delta_chunk, channel_chunk,
+        )  # [C, M, N]
 
-    # -- apply operator -------------------------------------------------------
-    y_flat = apply_sparse_multipath_dd_operator(delta_flat, ch_flat)
-    y = y_flat.reshape(P, R, M, N)  # [P, R, M, N]
+        # Apply evidence mask AFTER the operator.
+        masked_y = y_chunk * mask
+        score_chunks.append(
+            masked_y.abs().pow(2).sum(dim=(-2, -1)) / active_count,
+        )
 
-    # -- apply evidence mask AFTER operator -----------------------------------
-    masked_y = y * mask.reshape(1, 1, M, N)
-    scores = masked_y.abs().pow(2).sum(dim=(-2, -1)) / active_count  # [P, R]
-
-    return scores.to(dtype=real_dtype)
+    return torch.cat(score_chunks).reshape(P, R).to(dtype=real_dtype)
 
 
 # -- private helpers -----------------------------------------------------------
@@ -213,27 +227,24 @@ def _prepare_shared_evidence_mask(
     return mask
 
 
-def _expand_scenario_channel_for_pairs(
+def _operator_flat_batch_size(K: int, M: int, N: int) -> int:
+    """Bound temporary shifted elements while retaining vectorized kernels."""
+    elements_per_item = K * M * N
+    return max(1, _MAX_VECTORIZED_OPERATOR_ELEMENTS // elements_per_item)
+
+
+def _select_scenario_channel(
     ch_R: SparseMultipathDDChannel,
-    P: int,
-    R: int,
-    K: int,
+    scenario_indices: torch.Tensor,
 ) -> SparseMultipathDDChannel:
-    """Expand a [R, K, *] channel to [P*R, K, *] for pair-scenario batch."""
-    shifts = ch_R.path_shifts.unsqueeze(0).expand(P, R, K, 2).reshape(
-        P * R, K, 2,
-    )
-    gains = ch_R.path_gains.unsqueeze(0).expand(P, R, K).reshape(
-        P * R, K,
-    )
-    mask = None
-    if ch_R.path_active_mask is not None:
-        mask = (ch_R.path_active_mask.unsqueeze(0)
-                .expand(P, R, K).reshape(P * R, K))
+    """Select scenario rows for one flattened pair-scenario chunk."""
     return SparseMultipathDDChannel(
-        path_shifts=shifts,
-        path_gains=gains,
-        path_active_mask=mask,
+        path_shifts=ch_R.path_shifts[scenario_indices],
+        path_gains=ch_R.path_gains[scenario_indices],
+        path_active_mask=(
+            ch_R.path_active_mask[scenario_indices]
+            if ch_R.path_active_mask is not None else None
+        ),
     )
 
 

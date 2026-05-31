@@ -1,9 +1,11 @@
 """Tests for cloud-ready TX-only L_core training orchestration."""
 
 import json
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import torch
@@ -299,6 +301,31 @@ class TinyCloudRunTests(unittest.TestCase):
             )
         state_after = torch.random.get_rng_state()
         self.assertTrue(torch.equal(state_before, state_after))
+
+    def test_emit_progress_prints_lightweight_training_status(self):
+        run_config = _tiny_run_config(
+            train_steps=2, progress_every=1,
+        )
+        stream = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir, redirect_stdout(stream):
+            run_tx_cloud_training(
+                self.tx_config, tmpdir, run_config=run_config,
+                emit_progress=True,
+            )
+        records = [
+            json.loads(line) for line in stream.getvalue().splitlines()
+        ]
+        events = [record["event"] for record in records]
+        self.assertIn("training_start", events)
+        self.assertIn("baseline_validation_start", events)
+        progress = [
+            record for record in records
+            if record["event"] == "train_progress"
+        ]
+        self.assertEqual([record["step"] for record in progress], [1, 2])
+        for record in progress:
+            self.assertIn("latest_train_l_core", record)
+            self.assertIn("estimated_remaining_seconds", record)
 
     def test_ascii_only_and_docstrings(self):
         path = TRANSMITTER_ROOT / "experiments" / "tx_cloud_train.py"
