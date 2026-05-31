@@ -1,0 +1,34 @@
+# Local assistant and editor settings
+.claude/
+.vscode/
+.idea/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Training outputs and model checkpoints
+artifacts/
+*.pt
+*.pth
+*.ckpt
+*.jsonl
+
+# Local paper library and extracted paper text
+Doc/papers/
+
+# OS files
+.DS_Store
+Thumbs.db
