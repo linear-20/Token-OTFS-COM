@@ -1,0 +1,17 @@
+[
+  {
+    "until_step": 20000,
+    "max_delay": 1,
+    "max_doppler": 1
+  },
+  {
+    "until_step": 60000,
+    "max_delay": 2,
+    "max_doppler": 2
+  },
+  {
+    "until_step": 120000,
+    "max_delay": 3,
+    "max_doppler": 4
+  }
+]

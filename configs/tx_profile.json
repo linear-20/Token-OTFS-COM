@@ -1,0 +1,17 @@
+{
+  "M": 32,
+  "N": 32,
+  "vocab_size": 256,
+  "pilot_delay": 16,
+  "pilot_doppler": 16,
+  "pilot_guard_delay": 4,
+  "pilot_guard_doppler": 5,
+  "pilot_obs_delay_radius": 1,
+  "pilot_obs_doppler_radius": 1,
+  "data_power": 1.0,
+  "pilot_value_real": 2.0,
+  "pilot_value_imag": 0.0,
+  "max_channel_delay": 3,
+  "max_channel_doppler": 4,
+  "complex_dtype": "complex64"
+}
