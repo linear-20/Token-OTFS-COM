@@ -340,6 +340,9 @@ checkpoint 包含 optimizer 状态、当前 codebook、当前训练场景和 RNG
 | `--num-test-scenarios` | 固定 held-out 测试场景数 | 建议 512 |
 | `--num-paths` | 每个稀疏场景的路径数 \(K\) | 首轮建议 3 |
 | `--target-margin` | 全局裕量 \(\gamma\) | pilot 中比较 0.5、1.0、2.0 |
+| `--training-risk-aggregation` | TX-only penalty 聚合方式 | 主基线使用 `mean`；`tail_cvar` 仅用于尾部消融 |
+| `--tail-cvar-fraction` | `tail_cvar` 保留的最差 pair-scenario 比例 | 尾部消融建议先用 `0.05` |
+| `--allow-duplicate-dd-taps` | 允许同一场景重复抽取 DD bin | 仅用于复现旧逻辑，不建议用于主实验 |
 | `--learning-rate` | Adam 学习率 | pilot 中比较 0.001、0.003、0.01 |
 
 计算复杂度近似为：
@@ -357,6 +360,31 @@ M, N
 ```
 
 不要为了省显存修改验证集和测试集的独立性。
+
+### 有效 DD tap 与尾部审计
+
+云训练默认将每个随机场景建模为 \(K\) 个不同的 on-grid 有效 DD taps。同一场景不重复抽取同一个 DD bin，避免重复 bin 的复增益相消破坏单位有效 tap 功率语义。底层稀疏算子仍然支持 duplicate shifts，用于受控实验和一般线性组合。
+
+对已完成 run 进行只读尾部审计：
+
+```bash
+python -m experiments.tx_tail_audit \
+  --run-dir artifacts/tx_v256_m32_seed2026 \
+  --split test \
+  --artifact both \
+  --device cuda:0
+```
+
+审计会输出困难 pair、困难 scenario、尾部分位数以及 `scenarios_with_duplicate_dd_taps`。旧训练逻辑的复现实验才应显式增加 `--allow-duplicate-dd-taps`。
+
+如果 corrected `mean` 基线在多个 seed 下仍有稳定尾部差距，再运行单独的 empirical CVaR 消融：
+
+```bash
+--training-risk-aggregation tail_cvar \
+--tail-cvar-fraction 0.05
+```
+
+这不会增加 TX 模块，也不会修改全局物理 margin。它只将同一个 squared margin deficit 聚合为最差 \(5\%\) pair-scenario penalty 的均值。
 
 ## 10. SNR 在哪里设置
 

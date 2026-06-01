@@ -457,6 +457,39 @@ class SamplingTests(unittest.TestCase):
             (bank.channel.path_shifts == torch.tensor([7, 3])).all()
         )
 
+    def test_unique_shift_sampling_has_no_repeated_dd_bins_per_scenario(self):
+        bank = sample_normalized_sparse_multipath_scenario_bank(
+            _src_shift_set(), 20, 3, unique_shifts_per_scenario=True,
+        )
+        for row in bank.channel.path_shifts:
+            self.assertEqual(torch.unique(row, dim=0).shape[0], 3)
+
+    def test_unique_shift_sampling_rejects_insufficient_positive_support(self):
+        ss = SparseShiftSet(
+            shifts=torch.tensor([[7, 3], [1, 0]], dtype=torch.long),
+            weights=torch.tensor([1.0, 0.0]),
+        )
+        with self.assertRaises(ValueError):
+            sample_normalized_sparse_multipath_scenario_bank(
+                ss, 2, 2, unique_shifts_per_scenario=True,
+            )
+
+    def test_unique_shift_sampling_rejects_duplicate_source_dd_bins(self):
+        ss = SparseShiftSet(
+            shifts=torch.tensor([[7, 3], [7, 3]], dtype=torch.long),
+            weights=torch.tensor([1.0, 1.0]),
+        )
+        with self.assertRaises(ValueError):
+            sample_normalized_sparse_multipath_scenario_bank(
+                ss, 2, 1, unique_shifts_per_scenario=True,
+            )
+
+    def test_unique_shift_sampling_rejects_non_bool_flag(self):
+        with self.assertRaises(TypeError):
+            sample_normalized_sparse_multipath_scenario_bank(
+                _src_shift_set(), 2, 1, unique_shifts_per_scenario=1,
+            )
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_cuda_source_shifts_still_return_canonical_cpu(self):
         ss = SparseShiftSet(

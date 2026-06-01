@@ -6,6 +6,7 @@ This experiment harness keeps the Step 17C2 transmitter objective unchanged:
 
 It adds experiment controls needed for longer runs:
 - causal integer-delay and signed integer-Doppler support;
+- unique effective DD taps within each sampled training scenario;
 - progressive DD-support curriculum;
 - refreshed training scenario banks;
 - fixed held-out validation and test banks from independent RNG streams;
@@ -54,6 +55,10 @@ from transmitter.shaping import SparseShiftSet
 from transmitter.sparse_multipath import SparseMultipathDDChannel
 
 from .step19_lcore_harness import summarize_separation_scores
+from .tail_risk import (
+    empirical_tail_cvar_margin_loss,
+    summarize_tail_separation_scores,
+)
 
 
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -90,7 +95,10 @@ class TXCloudTrainConfig:
     num_validation_scenarios: int = 128
     num_test_scenarios: int = 128
     num_paths: int = 3
+    unique_dd_taps_per_scenario: bool = True
     target_margin: float = 1.0
+    training_risk_aggregation: str = "mean"
+    tail_cvar_fraction: float = 0.05
     learning_rate: float = 0.01
     device: str = "cpu"
     curriculum: tuple[TXCurriculumStage, ...] = ()
@@ -113,6 +121,24 @@ class TXCloudTrainConfig:
         ):
             _validate_positive_int(name, getattr(self, name))
         _validate_finite_non_negative("target_margin", self.target_margin)
+        if not isinstance(self.unique_dd_taps_per_scenario, bool):
+            raise TypeError(
+                "unique_dd_taps_per_scenario must be bool, "
+                f"got {type(self.unique_dd_taps_per_scenario).__name__}."
+            )
+        if not isinstance(self.training_risk_aggregation, str):
+            raise TypeError(
+                "training_risk_aggregation must be str, "
+                f"got {type(self.training_risk_aggregation).__name__}."
+            )
+        if self.training_risk_aggregation not in {"mean", "tail_cvar"}:
+            raise ValueError(
+                "training_risk_aggregation must be 'mean' or 'tail_cvar', "
+                f"got {self.training_risk_aggregation!r}."
+            )
+        _validate_probability_open_closed(
+            "tail_cvar_fraction", self.tail_cvar_fraction,
+        )
         _validate_finite_positive("learning_rate", self.learning_rate)
         if not isinstance(self.device, str):
             raise TypeError(
@@ -239,11 +265,13 @@ def run_tx_cloud_training(
         stages[-1], run_config.num_validation_scenarios,
         run_config.num_paths, generators["validation_scenarios"],
         tx_config.torch_complex_dtype, "held_out_validation_scenarios",
+        run_config.unique_dd_taps_per_scenario,
     )
     test_bank = _sample_bank(
         stages[-1], run_config.num_test_scenarios,
         run_config.num_paths, generators["test_scenarios"],
         tx_config.torch_complex_dtype, "held_out_test_scenarios",
+        run_config.unique_dd_taps_per_scenario,
     )
     validation_pairs = sample_uniform_cross_token_pairs(
         tx_config.vocab_size, run_config.validation_pairs,
@@ -348,6 +376,11 @@ def run_tx_cloud_training(
             diagnostics = summarize_separation_scores(
                 scores, target_margin=run_config.target_margin,
             )
+            tail_diagnostics = summarize_tail_separation_scores(
+                scores,
+                target_margin=run_config.target_margin,
+                tail_fraction=run_config.tail_cvar_fraction,
+            )
             powers = data_codeword_power(cw, data_mask)
         record = {
             "phase": phase,
@@ -355,6 +388,7 @@ def run_tx_cloud_training(
             "step": step,
             "eval_l_core": float(eval_l_core.item()),
             **diagnostics,
+            **tail_diagnostics,
             "data_power_min": float(powers.min().item()),
             "data_power_max": float(powers.max().item()),
             "latest_train_l_core": latest_train_loss,
@@ -402,6 +436,7 @@ def run_tx_cloud_training(
                 run_config.num_paths, generators["train_scenarios"],
                 tx_config.torch_complex_dtype,
                 f"train_scenarios_draw_{train_bank_draw_count + 1}",
+                run_config.unique_dd_taps_per_scenario,
             )
             current_stage_index = stage_index
             train_bank_draw_count += 1
@@ -411,9 +446,9 @@ def run_tx_cloud_training(
             generator=generators["train_pairs"],
         )
         cw = codebook.forward(data_mask=data_mask)
-        loss = sparse_multipath_operator_margin_loss(
+        loss = _training_margin_loss(
             cw, train_pairs, current_train_bank, evidence_mask,
-            target_margin=run_config.target_margin,
+            run_config=run_config,
         )
         optimizer.zero_grad()
         loss.backward()
@@ -487,6 +522,7 @@ def _sample_bank(
     generator: torch.Generator,
     complex_dtype: torch.dtype,
     name: str,
+    unique_dd_taps_per_scenario: bool,
 ) -> SparseMultipathScenarioBank:
     support = build_causal_integer_shift_set(
         max_delay=stage.max_delay,
@@ -496,6 +532,36 @@ def _sample_bank(
     return sample_normalized_sparse_multipath_scenario_bank(
         support, num_scenarios=num_scenarios, num_paths=num_paths,
         generator=generator, complex_dtype=complex_dtype, name=name,
+        unique_shifts_per_scenario=unique_dd_taps_per_scenario,
+    )
+
+
+def _training_margin_loss(
+    codeword_book: torch.Tensor,
+    token_pairs: torch.Tensor,
+    scenario_bank: SparseMultipathScenarioBank,
+    evidence_mask: torch.Tensor,
+    *,
+    run_config: TXCloudTrainConfig,
+) -> torch.Tensor:
+    """Apply the configured single-objective margin-risk aggregation."""
+    if run_config.training_risk_aggregation == "mean":
+        return sparse_multipath_operator_margin_loss(
+            codeword_book, token_pairs, scenario_bank, evidence_mask,
+            target_margin=run_config.target_margin,
+        )
+    if scenario_bank.scenario_weights is not None:
+        raise ValueError(
+            "tail_cvar training requires a sampled bank with "
+            "scenario_weights=None so pair-scenario outcomes are uniform."
+        )
+    scores = sparse_multipath_operator_separation_scores(
+        codeword_book, token_pairs, scenario_bank, evidence_mask,
+    )
+    return empirical_tail_cvar_margin_loss(
+        scores,
+        target_margin=run_config.target_margin,
+        tail_fraction=run_config.tail_cvar_fraction,
     )
 
 
@@ -762,12 +828,22 @@ def _build_manifest(
         "flags": {
             "surrogate_only": True,
             "gradient_objective":
-                "sparse_multipath_operator_margin_loss_only",
+                (
+                    "sparse_multipath_operator_margin_loss_only"
+                    if run_config.training_risk_aggregation == "mean"
+                    else "empirical_tail_cvar_margin_loss_only"
+                ),
+            "training_risk_aggregation":
+                run_config.training_risk_aggregation,
+            "tail_risk_training_applied":
+                run_config.training_risk_aggregation == "tail_cvar",
             "scenario_weights_downstream_uniform": True,
             "training_scenario_banks_refreshed": True,
             "validation_test_have_no_gradient": True,
             "causal_integer_delay_support": True,
             "signed_integer_doppler_support": True,
+            "unique_dd_taps_per_scenario":
+                run_config.unique_dd_taps_per_scenario,
             "snr_training_applied": False,
             "fractional_delay_doppler_training_applied": False,
             "waveform_evaluation_performed": False,
@@ -862,6 +938,17 @@ def _validate_finite_positive(name: str, value: float) -> None:
         raise ValueError(f"{name} must be finite and > 0, got {value}.")
 
 
+def _validate_probability_open_closed(name: str, value: float) -> None:
+    if (isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+            or value > 1):
+        raise ValueError(
+            f"{name} must be finite and in (0, 1], got {value}."
+        )
+
+
 def _default_tx_config() -> TransmitterConfig:
     return TransmitterConfig(
         M=12, N=12, vocab_size=16,
@@ -917,7 +1004,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-validation-scenarios", type=int, default=128)
     parser.add_argument("--num-test-scenarios", type=int, default=128)
     parser.add_argument("--num-paths", type=int, default=3)
+    parser.add_argument(
+        "--allow-duplicate-dd-taps",
+        action="store_false",
+        dest="unique_dd_taps_per_scenario",
+        help=(
+            "Legacy ablation only: permit repeated DD bins within one "
+            "sampled scenario."
+        ),
+    )
     parser.add_argument("--target-margin", type=float, default=1.0)
+    parser.add_argument(
+        "--training-risk-aggregation",
+        choices=("mean", "tail_cvar"),
+        default="mean",
+    )
+    parser.add_argument("--tail-cvar-fraction", type=float, default=0.05)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--warmup-steps", type=int, default=250)
@@ -964,7 +1066,10 @@ def main() -> None:
         num_validation_scenarios=args.num_validation_scenarios,
         num_test_scenarios=args.num_test_scenarios,
         num_paths=args.num_paths,
+        unique_dd_taps_per_scenario=args.unique_dd_taps_per_scenario,
         target_margin=args.target_margin,
+        training_risk_aggregation=args.training_risk_aggregation,
+        tail_cvar_fraction=args.tail_cvar_fraction,
         learning_rate=args.learning_rate,
         device=args.device,
         curriculum=curriculum,

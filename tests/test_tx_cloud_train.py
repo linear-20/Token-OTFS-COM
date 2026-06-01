@@ -53,6 +53,7 @@ def _tiny_run_config(**overrides):
         num_validation_scenarios=3,
         num_test_scenarios=3,
         num_paths=2,
+        unique_dd_taps_per_scenario=False,
         target_margin=0.5,
         learning_rate=0.01,
         device="cpu",

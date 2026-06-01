@@ -236,11 +236,13 @@ def sample_normalized_sparse_multipath_scenario_bank(
     generator: torch.Generator | None = None,
     complex_dtype: torch.dtype = torch.complex64,
     name: str = "sampled_sparse_multipath_scenarios",
+    unique_shifts_per_scenario: bool = False,
 ) -> SparseMultipathScenarioBank:
     """Sample a fixed non-learnable sparse multipath scenario bank.
 
     1. Sample shift source indices from the weighted shift distribution q[s]
-       using torch.multinomial.
+       using torch.multinomial. If unique_shifts_per_scenario=True, sample
+       distinct DD bins within each scenario without replacement.
     2. Look up sampled shifts from source_shift_set.shifts.
     3. Sample i.i.d. complex Gaussian gains and normalize each scenario:
           h[r] = g_raw[r] / ||g_raw[r]||_2
@@ -256,6 +258,9 @@ def sample_normalized_sparse_multipath_scenario_bank(
         generator: Optional CPU torch.Generator.
         complex_dtype: torch.complex64 or torch.complex128.
         name: Non-empty scenario bank identifier.
+        unique_shifts_per_scenario: If True, require source DD bins to be
+            unique and sample K distinct bins within each scenario. This is
+            appropriate when path slots represent effective on-grid DD taps.
 
     Returns:
         SparseMultipathScenarioBank (canonical CPU, R scenarios each with
@@ -274,6 +279,11 @@ def sample_normalized_sparse_multipath_scenario_bank(
         )
     _validate_sampling_args(source_shift_set, num_scenarios, num_paths,
                             complex_dtype, name)
+    if not isinstance(unique_shifts_per_scenario, bool):
+        raise TypeError(
+            "unique_shifts_per_scenario must be bool, "
+            f"got {type(unique_shifts_per_scenario).__name__}."
+        )
     if generator is not None:
         _validate_cpu_generator(generator)
 
@@ -300,10 +310,30 @@ def sample_normalized_sparse_multipath_scenario_bank(
             "source_shift_set normalized weights sum must be > 0."
         )
 
-    flat_indices = torch.multinomial(
-        q_cpu, R * K, replacement=True, generator=generator,
-    )  # long [R*K]
-    source_shift_indices = flat_indices.reshape(R, K)  # [R, K]
+    if unique_shifts_per_scenario:
+        source_shifts_cpu = source_shift_set.shifts.detach().to(
+            device=torch.device("cpu"), dtype=torch.long, copy=True,
+        )
+        if torch.unique(source_shifts_cpu, dim=0).shape[0] != \
+                source_shifts_cpu.shape[0]:
+            raise ValueError(
+                "unique_shifts_per_scenario=True requires source_shift_set "
+                "to contain unique DD bins."
+            )
+        positive_support = int((q_cpu > 0).sum().item())
+        if K > positive_support:
+            raise ValueError(
+                "unique_shifts_per_scenario=True requires num_paths <= "
+                f"positive-weight DD bins, got {K} > {positive_support}."
+            )
+        source_shift_indices = torch.multinomial(
+            q_cpu.expand(R, -1), K, replacement=False, generator=generator,
+        )  # long [R, K]
+    else:
+        flat_indices = torch.multinomial(
+            q_cpu, R * K, replacement=True, generator=generator,
+        )  # long [R*K]
+        source_shift_indices = flat_indices.reshape(R, K)  # [R, K]
 
     source_shifts_cpu = source_shift_set.shifts.detach().to(
         device=torch.device("cpu"), dtype=torch.long, copy=True,
