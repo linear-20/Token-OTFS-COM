@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "study_name": "tx_v256_m32_ablations",
+  "output_root": "artifacts/tx_studies",
+  "tx_profile_json": "configs/tx_profile.json",
+  "curriculum_json": "configs/tx_curriculum.json",
+  "base_run_config": {
+    "device": "cuda:0",
+    "train_steps": 120000,
+    "train_pairs_per_step": 128,
+    "validation_pairs": 1024,
+    "test_pairs": 2048,
+    "eval_every": 500,
+    "checkpoint_every": 500,
+    "progress_every": 25,
+    "train_bank_refresh_every": 25,
+    "num_train_scenarios": 64,
+    "num_validation_scenarios": 256,
+    "num_test_scenarios": 512,
+    "num_paths": 3,
+    "unique_dd_taps_per_scenario": true,
+    "target_margin": 1.0,
+    "training_risk_aggregation": "mean",
+    "tail_cvar_fraction": 0.05,
+    "learning_rate": 0.003,
+    "seed": 2026
+  },
+  "runs": [
+    {
+      "name": "margin_1p0_mean",
+      "description": "Global-margin sensitivity baseline at gamma=1.0.",
+      "tags": [
+        "A1_margin",
+        "mean_l_core"
+      ],
+      "overrides": {
+        "target_margin": 1.0
+      }
+    },
+    {
+      "name": "margin_1p5_mean",
+      "description": "Global-margin sensitivity at gamma=1.5.",
+      "tags": [
+        "A1_margin",
+        "mean_l_core"
+      ],
+      "overrides": {
+        "target_margin": 1.5
+      }
+    },
+    {
+      "name": "margin_2p0_mean",
+      "description": "Global-margin sensitivity at gamma=2.0.",
+      "tags": [
+        "A1_margin",
+        "mean_l_core"
+      ],
+      "overrides": {
+        "target_margin": 2.0
+      }
+    },
+    {
+      "name": "margin_2p5_mean",
+      "description": "Global-margin sensitivity at gamma=2.5.",
+      "tags": [
+        "A1_margin",
+        "mean_l_core"
+      ],
+      "overrides": {
+        "target_margin": 2.5
+      }
+    },
+    {
+      "name": "margin_1p5_tail_cvar05",
+      "description": "Tail-risk ablation: worst 5 percent empirical CVaR at gamma=1.5.",
+      "tags": [
+        "A3_tail_risk",
+        "tail_cvar"
+      ],
+      "overrides": {
+        "target_margin": 1.5,
+        "training_risk_aggregation": "tail_cvar",
+        "tail_cvar_fraction": 0.05
+      }
+    },
+    {
+      "name": "margin_1p5_no_curriculum",
+      "description": "Curriculum ablation: full DD support from the first step.",
+      "tags": [
+        "A2_curriculum",
+        "mean_l_core"
+      ],
+      "curriculum_json": null,
+      "overrides": {
+        "target_margin": 1.5
+      }
+    }
+  ]
+}

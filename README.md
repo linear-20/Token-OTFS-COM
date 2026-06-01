@@ -68,8 +68,88 @@ $env:PYTHONPATH = ".\Learnable_Mapping_Tokens-to-DD-Signals"
 先运行云端训练入口的定向测试：
 
 ```bash
-python -m unittest tests.test_tx_cloud_train
+python -m unittest tests.test_tx_cloud_train tests.test_tx_train_entry
 ```
+
+### 推荐：使用统一训练入口
+
+仓库提供两个可直接修改的实验配置：
+
+```text
+configs/tx_train_main.json
+configs/tx_ablation_suite.json
+```
+
+主训练前先检查解析后的参数，不会启动训练：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_train_main.json \
+  --dry-run
+```
+
+确认无误后启动 corrected `mean L_core` 主训练：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_train_main.json
+```
+
+每个 run 使用独立目录：
+
+```text
+artifacts/tx_studies/<study_name>/<run_name>/
+```
+
+目录内除了 TX artifact，还会保存：
+
+```text
+entry_resolved_config.json
+```
+
+study 级目录会保存：
+
+```text
+study_plan.json
+study_manifest.json
+```
+
+断点恢复：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_train_main.json \
+  --resume
+```
+
+### 运行消融实验
+
+先列出消融项：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_ablation_suite.json \
+  --list-runs
+```
+
+按名称运行单个消融，避免误启动整套实验：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_ablation_suite.json \
+  --only-run margin_1p5_mean
+```
+
+可重复指定 `--only-run`，顺序执行多个实验：
+
+```bash
+python -m experiments.tx_train_entry \
+  --experiment-json configs/tx_ablation_suite.json \
+  --only-run margin_1p0_mean \
+  --only-run margin_1p5_mean
+```
+
+修改参数时，优先编辑 JSON。`base_run_config` 放共享参数；每个 run 的 `overrides` 只放该消融项变化的参数。修改已有 run 参数后应同时修改 run 名称，避免覆盖旧 artifact。
 
 ## 3. 已提供的 TX 配置
 
@@ -78,6 +158,8 @@ python -m unittest tests.test_tx_cloud_train
 ```text
 configs/tx_profile.json
 configs/tx_curriculum.json
+configs/tx_train_main.json
+configs/tx_ablation_suite.json
 ```
 
 默认 pilot profile：
