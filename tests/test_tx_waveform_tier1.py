@@ -64,18 +64,29 @@ def _tiny_tier1_config(**updates):
     return Tier1WaveformConfig(**values)
 
 
-def _write_identical_artifact_run(root):
+def _write_artifact_run(root, *, shaped_seed=None):
     cfg = _tiny_tx_config()
-    codebook = TokenDDCodebook(cfg)
+    baseline_codebook = TokenDDCodebook(cfg)
     initialize_token_codebook_(
-        codebook,
+        baseline_codebook,
         mode="random_phase",
         generator=torch.Generator(device="cpu").manual_seed(7),
     )
+    shaped_codebook = baseline_codebook
+    if shaped_seed is not None:
+        shaped_codebook = TokenDDCodebook(cfg)
+        generator = torch.Generator(device="cpu").manual_seed(shaped_seed)
+        with torch.no_grad():
+            shaped_codebook.raw_real.copy_(
+                torch.randn(shaped_codebook.raw_real.shape, generator=generator),
+            )
+            shaped_codebook.raw_imag.copy_(
+                torch.randn(shaped_codebook.raw_imag.shape, generator=generator),
+            )
     baseline = root / "baseline_physical_codeword_book.pt"
     shaped = root / "shaped_physical_codeword_book.pt"
-    export_physical_codeword_book(codebook, baseline)
-    export_physical_codeword_book(codebook, shaped)
+    export_physical_codeword_book(baseline_codebook, baseline)
+    export_physical_codeword_book(shaped_codebook, shaped)
     manifest = {
         "schema_version": 1,
         "complete": True,
@@ -88,6 +99,10 @@ def _write_identical_artifact_run(root):
     with open(root / "manifest.json", "w", encoding="ascii") as handle:
         json.dump(manifest, handle)
     return cfg
+
+
+def _write_identical_artifact_run(root):
+    return _write_artifact_run(root)
 
 
 def _run_silently(*args, **kwargs):
@@ -140,6 +155,35 @@ class OracleMLTests(unittest.TestCase):
 
 
 class Tier1TinyRunTests(unittest.TestCase):
+
+    def test_cp_waveform_power_difference_does_not_reject_paired_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_artifact_run(root, shaped_seed=13)
+            manifest = _run_silently(
+                root,
+                root / "tier1",
+                config=_tiny_tier1_config(num_scenarios=1),
+            )
+            artifacts = manifest["artifacts"]
+            self.assertAlmostEqual(
+                artifacts["baseline"]["average_useful_dd_reference_power"],
+                artifacts["shaped"]["average_useful_dd_reference_power"],
+                places=6,
+            )
+            self.assertNotAlmostEqual(
+                artifacts["baseline"][
+                    "average_transmit_waveform_power_including_cp"
+                ],
+                artifacts["shaped"][
+                    "average_transmit_waveform_power_including_cp"
+                ],
+                places=6,
+            )
+            self.assertEqual(
+                manifest["noise_convention"]["reference_domain"],
+                "pre-CP DD frame / useful OFDM samples",
+            )
 
     def test_identical_artifacts_produce_exact_paired_metrics(self):
         with tempfile.TemporaryDirectory() as tmpdir:

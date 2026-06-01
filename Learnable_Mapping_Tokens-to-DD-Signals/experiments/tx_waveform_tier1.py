@@ -257,16 +257,22 @@ def run_tx_waveform_tier1(
         name: float(x_time_books[name].abs().pow(2).mean().item())
         for name in _ARTIFACT_VARIANTS
     }
+    useful_reference_powers = {
+        name: float(x_dd_books[name].abs().pow(2).mean().item())
+        for name in _ARTIFACT_VARIANTS
+    }
     if not math.isclose(
-        transmit_powers["baseline"], transmit_powers["shaped"],
+        useful_reference_powers["baseline"],
+        useful_reference_powers["shaped"],
         rel_tol=1e-5, abs_tol=1e-7,
     ):
         raise ValueError(
-            "Baseline and shaped waveform books must have equal average "
-            "transmit power for paired Tier 1 validation."
+            "Baseline and shaped DD books must have equal average useful "
+            "sample power for paired Tier 1 validation."
         )
     noise_reference_power = 0.5 * (
-        transmit_powers["baseline"] + transmit_powers["shaped"]
+        useful_reference_powers["baseline"]
+        + useful_reference_powers["shaped"]
     )
 
     token_ids = torch.randint(
@@ -413,15 +419,26 @@ def run_tx_waveform_tier1(
             name: {
                 "path": str(artifact_paths[name]),
                 "artifact_sha256": payloads[name]["metadata"]["artifact_sha256"],
-                "average_transmit_waveform_power": transmit_powers[name],
+                "average_transmit_waveform_power_including_cp":
+                    transmit_powers[name],
+                "average_useful_dd_reference_power":
+                    useful_reference_powers[name],
+                "cp_waveform_power_ratio": (
+                    transmit_powers[name] / useful_reference_powers[name]
+                ),
             }
             for name in _ARTIFACT_VARIANTS
         },
         "noise_convention": {
             "description": (
-                "Paired complex AWGN uses one fixed transmit-waveform-power "
-                "reference shared by baseline and shaped artifacts."
+                "Paired complex AWGN uses one fixed useful-sample-power "
+                "reference shared by baseline and shaped artifacts. The "
+                "reference is measured before CP duplication from the DD "
+                "frame; unitary modulation preserves it over useful OFDM "
+                "samples. CP-duplicated waveform power is recorded separately "
+                "and is not required to match across codebooks."
             ),
+            "reference_domain": "pre-CP DD frame / useful OFDM samples",
             "reference_power": noise_reference_power,
             "identical_noise_for_baseline_and_shaped": True,
         },
